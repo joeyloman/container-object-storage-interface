@@ -142,7 +142,7 @@ func (d *dynamicBucketTestHelper) ValidateDriverRequest(t *testing.T, createBuck
 		req.Protocols,
 	)
 	assert.Equal(t,
-		map[string]string{"maxSize": "100Gi"},
+		map[string]string{"maxSize": "100Gi", TenantNamespaceParam: "my-ns"},
 		req.Parameters,
 	)
 }
@@ -174,7 +174,7 @@ func (s *staticBucketTestHelper) ValidateDriverRequest(t *testing.T, createBucke
 		req.Protocols,
 	)
 	assert.Equal(t,
-		map[string]string{"maxSize": "100Gi"},
+		map[string]string{"maxSize": "100Gi", TenantNamespaceParam: "my-ns"},
 		req.Parameters,
 	)
 }
@@ -358,7 +358,12 @@ func bucketDeletionTestSuite(t *testing.T,
 				require.Len(t, deleteBucketReq, 1)
 				deleteReq := deleteBucketReq[0]
 				assert.Equal(t, initBucket.Status.BucketID, deleteReq.BucketId)
-				assert.Equal(t, initBucket.Spec.Parameters, deleteReq.Parameters)
+				// the driver gets the claim reference's namespace as the tenant context
+				expectedParams := initBucket.Spec.Parameters
+				if ns := initBucket.Spec.BucketClaimRef.Namespace; ns != "" {
+					expectedParams = tenantParams(expectedParams, ns)
+				}
+				assert.Equal(t, expectedParams, deleteReq.Parameters)
 			}
 
 			bootstrapped.AssertResourceDoesNotExist(t, cositest.NsName(initBucket), &cosiapi.Bucket{})
@@ -975,14 +980,14 @@ func TestBucketReconciler_dynamicProvision(t *testing.T) {
 		for k := range details.allProtoBucketInfo {
 			assert.True(t, strings.HasPrefix(k, "COSI_S3_"))
 		}
-		assert.Equal(t, inputParams, requestParams)
+		assert.Equal(t, tenantParams(inputParams, validClaimRef.Namespace), requestParams)
 	})
 
 	t.Run("valid driver and bucket, retryable provision error", func(t *testing.T) {
 		fakeServer := cositest.FakeProvisionerServer{
 			CreateBucketFunc: func(ctx context.Context, dcbr *cosiproto.DriverCreateBucketRequest) (*cosiproto.DriverCreateBucketResponse, error) {
-				if len(dcbr.Parameters) != 0 {
-					t.Errorf("expecting request parameters to be empty")
+				if len(dcbr.Parameters) != 1 || dcbr.Parameters[TenantNamespaceParam] != validClaimRef.Namespace {
+					t.Errorf("expecting request parameters to only carry the tenant namespace")
 				}
 				return &cosiproto.DriverCreateBucketResponse{}, status.Error(codes.Unknown, "fake unknown err")
 			},
@@ -1457,7 +1462,7 @@ func TestBucketReconciler_staticProvision(t *testing.T) {
 		for k := range details.allProtoBucketInfo {
 			assert.True(t, strings.HasPrefix(k, "COSI_S3_"))
 		}
-		assert.Equal(t, inputParams, requestParams)
+		assert.Equal(t, tenantParams(inputParams, validClaimRef.Namespace), requestParams)
 	})
 
 	t.Run("valid driver, claim ref malformed", func(t *testing.T) {

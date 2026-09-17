@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -265,12 +266,17 @@ func (r *BucketReconciler) reconcileDelete(
 
 	if bucket.Status.BucketID != "" {
 		logger.Info("calling driver to delete bucket", "bucketID", bucket.Status.BucketID)
-		_, err := r.DriverInfo.ProvisionerClient.DriverDeleteBucket(ctx,
-			&cosiproto.DriverDeleteBucketRequest{
-				BucketId:   bucket.Status.BucketID,
-				Parameters: bucket.Spec.Parameters,
-			},
-		)
+		req := &cosiproto.DriverDeleteBucketRequest{
+			BucketId:   bucket.Status.BucketID,
+			Parameters: bucket.Spec.Parameters,
+		}
+		// Only inject the tenant context when the claim reference carries a namespace;
+		// legacy/malformed Buckets fall back to operator credentials, matching
+		// create-side behavior for non-tenant objects.
+		if ns := claimRef.Namespace; ns != "" {
+			req.Parameters = tenantParams(req.Parameters, ns)
+		}
+		_, err := r.DriverInfo.ProvisionerClient.DriverDeleteBucket(ctx, req)
 		if err != nil {
 			logger.Error(err, "DriverDeleteBucket error")
 			if rpcErrorIsRetryable(status.Code(err)) {
@@ -293,6 +299,25 @@ func (r *BucketReconciler) reconcileDelete(
 	}
 
 	return nil
+}
+
+// TenantNamespaceParam is the RPC parameters key carrying the namespace that
+// owns the per-tenant credentials Secret. The Secret is created/deleted in the
+// namespace of the BucketClaim (Bucket) or BucketAccess. Only the namespace
+// crosses the RPC; the driver fetches the Secret itself. Drivers implementing
+// multi-tenant credentials MUST use this exact key.
+const TenantNamespaceParam = "cosi.tenantNamespace"
+
+// tenantParams returns a copy of params with the tenant namespace set; it
+// never mutates the input (Bucket.spec.parameters / BucketAccess status
+// parameters are shared maps).
+func tenantParams(params map[string]string, namespace string) map[string]string {
+	merged := maps.Clone(params)
+	if merged == nil {
+		merged = make(map[string]string, 1)
+	}
+	merged[TenantNamespaceParam] = namespace
+	return merged
 }
 
 // Details about provisioned bucket for both dynamic and static provisioning.
@@ -335,7 +360,7 @@ func (r *BucketReconciler) dynamicProvision(
 		&cosiproto.DriverCreateBucketRequest{
 			Name:       dynamic.bucketName,
 			Protocols:  dynamic.requiredProtos,
-			Parameters: dynamic.parameters,
+			Parameters: tenantParams(dynamic.parameters, cr.Namespace),
 		},
 	)
 	if err != nil {
@@ -398,7 +423,7 @@ func (r *BucketReconciler) staticProvision(
 		&cosiproto.DriverGetBucketRequest{
 			BucketId:   static.existingBucketID,
 			Protocols:  static.requiredProtos,
-			Parameters: static.parameters,
+			Parameters: tenantParams(static.parameters, ref.Namespace),
 		},
 	)
 	if err != nil {

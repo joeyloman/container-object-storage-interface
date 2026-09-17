@@ -250,8 +250,9 @@ func TestBucketAccessReconciler_Reconcile(t *testing.T) {
 			assert.Equal(t, "", req.ServiceAccountName)
 			assert.Equal(t,
 				map[string]string{
-					"maxSize": "100Gi",
-					"maxIops": "10",
+					"maxSize":                    "100Gi",
+					"maxIops":                    "10",
+					sidecar.TenantNamespaceParam: "my-ns",
 				},
 				req.Parameters,
 			)
@@ -278,8 +279,9 @@ func TestBucketAccessReconciler_Reconcile(t *testing.T) {
 			assert.Equal(t, "", req.ServiceAccountName)
 			assert.Equal(t,
 				map[string]string{
-					"maxSize": "100Gi",
-					"maxIops": "10",
+					"maxSize":                    "100Gi",
+					"maxIops":                    "10",
+					sidecar.TenantNamespaceParam: "my-ns",
 				},
 				req.Parameters,
 			)
@@ -1771,7 +1773,7 @@ func TestBucketAccessReconciler_Reconcile(t *testing.T) {
 			assert.Equal(t, cosiproto.AuthenticationType_SERVICE_ACCOUNT, req.AuthenticationType.Type)
 			assert.Equal(t, cosiproto.ObjectProtocol_AZURE, req.Protocol.Type)
 			assert.Equal(t, "azure-sa", req.ServiceAccountName)
-			assert.Empty(t, req.Parameters)
+			assert.Equal(t, map[string]string{sidecar.TenantNamespaceParam: "my-ns"}, req.Parameters)
 			require.Len(t, req.Buckets, 2) // by RPC spec, order of requested accessed buckets is random
 			assert.True(t, accessedBucketRequestExists(req.Buckets, &cosiproto.DriverGrantBucketAccessRequest_AccessedBucket{
 				BucketId:                 initRwBucket.Status.BucketID,
@@ -1843,7 +1845,7 @@ func TestBucketAccessReconciler_Reconcile(t *testing.T) {
 			require.Len(t, req.Buckets, 2)
 			assert.Equal(t, "cosi-bc-my-ns-readwrite-bucket", req.Buckets[0].BucketId)
 			assert.Equal(t, "cosi-bc-my-ns-readonly-bucket", req.Buckets[1].BucketId)
-			assert.Empty(t, req.Parameters)
+			assert.Equal(t, map[string]string{sidecar.TenantNamespaceParam: "my-ns"}, req.Parameters)
 
 			access, rwBucket, roBucket, _, _ := getAllResources(bootstrapped)
 
@@ -2013,8 +2015,9 @@ func TestBucketAccessReconciler_Reconcile(t *testing.T) {
 			assert.Equal(t, "", req.ServiceAccountName)
 			assert.Equal(t,
 				map[string]string{
-					"maxSize": "100Gi",
-					"maxIops": "10",
+					"maxSize":                    "100Gi",
+					"maxIops":                    "10",
+					sidecar.TenantNamespaceParam: "my-ns",
 				},
 				req.Parameters,
 			)
@@ -2092,8 +2095,9 @@ func TestBucketAccessReconciler_Reconcile(t *testing.T) {
 			assert.Equal(t, "cosi-bc-my-ns-readonly-bucket", req.Buckets[1].BucketId)
 			assert.Equal(t,
 				map[string]string{
-					"maxSize": "100Gi",
-					"maxIops": "10",
+					"maxSize":                    "100Gi",
+					"maxIops":                    "10",
+					sidecar.TenantNamespaceParam: "my-ns",
 				},
 				req.Parameters,
 			)

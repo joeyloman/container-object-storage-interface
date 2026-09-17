@@ -195,7 +195,7 @@ func (r *BucketAccessReconciler) reconcile(
 			Protocol:           &cosiproto.ObjectProtocol{Type: grantCfg.Protocol},
 			AuthenticationType: &cosiproto.AuthenticationType{Type: grantCfg.AuthenticationType},
 			ServiceAccountName: grantCfg.ServiceAccountName,
-			Parameters:         grantCfg.Parameters,
+			Parameters:         tenantParams(grantCfg.Parameters, access.Namespace),
 			Buckets:            grantCfg.RpcGrantBucketsList(),
 		},
 	)
@@ -300,7 +300,7 @@ func driverRevokeAccess(
 			Protocol:           &cosiproto.ObjectProtocol{Type: revokeCfg.Protocol},
 			AuthenticationType: &cosiproto.AuthenticationType{Type: revokeCfg.AuthenticationType},
 			ServiceAccountName: revokeCfg.ServiceAccountName,
-			Parameters:         revokeCfg.Parameters,
+			Parameters:         tenantParams(revokeCfg.Parameters, access.Namespace),
 			Buckets:            revokeCfg.RevokeBucketList,
 		},
 	)
