@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	cosiproto "sigs.k8s.io/container-object-storage-interface/proto"
 )
 
@@ -218,4 +219,33 @@ func TestValidateAndSetDriverConnectionInfo(t *testing.T) {
 		assert.Equal(t, "seven.of.nine", driverInfo.Name)
 		assert.Equal(t, []cosiproto.ObjectProtocol_Type{cosiproto.ObjectProtocol_S3}, driverInfo.SupportedProtocols)
 	})
+}
+
+func Test_rpcErrorIsRetryable(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		code      codes.Code
+		retryable bool
+	}{
+		"invalid argument is terminal":          {code: codes.InvalidArgument, retryable: false},
+		"already exists is terminal":            {code: codes.AlreadyExists, retryable: false},
+		"unimplemented is terminal":             {code: codes.Unimplemented, retryable: false},
+		"resource exhausted is terminal":        {code: codes.ResourceExhausted, retryable: false},
+		"permission denied is retryable":        {code: codes.PermissionDenied, retryable: true},
+		"aborted is retryable":                  {code: codes.Aborted, retryable: true},
+		"unauthenticated is retryable":          {code: codes.Unauthenticated, retryable: true},
+		"unknown defaults to retryable":         {code: codes.Unknown, retryable: true},
+		"internal defaults to retryable":        {code: codes.Internal, retryable: true},
+		"failed precondition defaults to retry": {code: codes.FailedPrecondition, retryable: true},
+	}
+
+	for name, tc := range tests {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.retryable, rpcErrorIsRetryable(tc.code))
+		})
+	}
 }

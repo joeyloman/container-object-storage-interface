@@ -158,6 +158,10 @@ func rpcErrorIsRetryable(c codes.Code) bool {
 		return true
 	case codes.Unimplemented:
 		return false
+	case codes.ResourceExhausted:
+		// Quota exhaustion (e.g. the backend object store's bucket quota is
+		// full) does not heal by retrying; an operator must free quota first.
+		return false
 	case codes.Unauthenticated:
 		return true
 	default:
