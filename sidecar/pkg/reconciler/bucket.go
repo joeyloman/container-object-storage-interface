@@ -32,8 +32,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	ctrlpredicate "sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -111,8 +113,7 @@ func (r *BucketReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 // SetupWithManager sets up the controller with the Manager.
 func (r *BucketReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&cosiapi.Bucket{}).
-		WithEventFilter(
+		For(&cosiapi.Bucket{}, builder.WithPredicates(
 			ctrlpredicate.And(
 				driverNameMatchesPredicate(r.DriverInfo.Name), // only opt in to reconciles with matching driver name
 				ctrlpredicate.Or(
@@ -126,9 +127,56 @@ func (r *BucketReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					cosipredicate.ProtectionFinalizerRemoved(r.Scheme), // re-add protection finalizer if removed
 				),
 			),
+		)).
+		// A Bucket can be deleted while its BucketClaim is still alive (for
+		// example by an administrator). The deletion is refused until the claim
+		// is deleted, and nothing else re-triggers this controller when that
+		// happens: the Bucket is already marked for deletion and its spec is
+		// immutable, so no Bucket event follows. Watch the claim so the bound
+		// Bucket is reconciled again as soon as the claim starts deleting.
+		Watches(
+			&cosiapi.BucketClaim{},
+			handler.EnqueueRequestsFromMapFunc(r.mapBucketClaimToBucket),
+			builder.WithPredicates(ctrlpredicate.Or(
+				cosipredicate.DeletionTimestampAdded(),
+				cosipredicate.AnyDelete(),
+			)),
 		).
 		Named("bucket").
 		Complete(r)
+}
+
+// mapBucketClaimToBucket maps a BucketClaim to the Bucket it is bound to, so
+// claim deletion events re-trigger the Bucket deletion path.
+func (r *BucketReconciler) mapBucketClaimToBucket(ctx context.Context, obj client.Object) []reconcile.Request {
+	claim, ok := obj.(*cosiapi.BucketClaim)
+	if !ok {
+		return nil
+	}
+
+	if claim.Status.BoundBucketName != "" {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: claim.Status.BoundBucketName}}}
+	}
+
+	// Status may not carry the binding (for example when the claim was deleted
+	// before the sidecar recorded it). Fall back to the Buckets that reference
+	// this claim.
+	buckets := &cosiapi.BucketList{}
+	if err := r.List(ctx, buckets); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "failed to list Buckets for BucketClaim", "bucketClaim", claim.Name)
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for i := range buckets.Items {
+		ref := buckets.Items[i].Spec.BucketClaimRef
+		if ref.Namespace == claim.Namespace && (ref.UID == claim.UID || ref.Name == claim.Name) {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: buckets.Items[i].Name},
+			})
+		}
+	}
+	return requests
 }
 
 func (r *BucketReconciler) reconcile(ctx context.Context, logger logr.Logger, bucket *cosiapi.Bucket) error {
@@ -242,17 +290,33 @@ func (r *BucketReconciler) reconcileDelete(
 
 	_, claimDeleting := bucket.Annotations[cosiapi.BucketClaimBeingDeletedAnnotation]
 	claimRef := bucket.Spec.BucketClaimRef
+	if !claimDeleting && claimRef.UID != types.UID("") {
+		// The annotation is applied by the BucketClaim controller before it
+		// deletes the Bucket, but it can be missing: the Bucket may have been
+		// deleted first, or the controller may have been interrupted. Consult
+		// the claim itself. A missing claim (already garbage collected) and a
+		// claim that is being deleted both allow the deletion to proceed;
+		// refusing in those cases deadlocks the claim, which waits for the
+		// Bucket to disappear before removing its own finalizer.
+		claim := &cosiapi.BucketClaim{}
+		err := r.Get(ctx, types.NamespacedName{Name: claimRef.Name, Namespace: claimRef.Namespace}, claim)
+		switch {
+		case kerrors.IsNotFound(err):
+			claimDeleting = true
+		case err != nil:
+			return fmt.Errorf("failed to get BucketClaim %s/%s: %w", claimRef.Namespace, claimRef.Name, err)
+		default:
+			claimDeleting = !claim.DeletionTimestamp.IsZero()
+		}
+	}
 	logger = logger.WithValues("bucketClaimBeingDeleted", claimDeleting, "bucketClaimRef", claimRef)
 	if !claimDeleting {
-		// Annotation means deletion should proceed. Not present, needs more checking.
-		if claimRef.UID != types.UID("") {
-			// Bucket is bound to a BucketClaim, so cannot delete
-			// BucketClaim controller will apply the annotation when it cleans up the claim
-			logger.Error(nil, "will not delete Bucket bound to a non-deleting BucketClaim")
-			return cosierr.NonRetryableError(
-				fmt.Errorf("will not delete Bucket bound to a non-deleting BucketClaim: %#v", claimRef))
-		}
-		// claimRef.UID == "": not bound to a BucketClaim, so can delete
+		// Bucket is bound to a live BucketClaim, so it cannot be deleted. This
+		// is a retryable error: the claim watch re-enqueues this Bucket when
+		// the claim starts deleting, and retrying also recovers from a stale
+		// cached read instead of leaving the pair permanently stuck.
+		logger.Info("will not delete Bucket bound to a non-deleting BucketClaim")
+		return fmt.Errorf("will not delete Bucket bound to a non-deleting BucketClaim: %#v", claimRef)
 	}
 
 	logger.Info("proceeding with Bucket deletion")

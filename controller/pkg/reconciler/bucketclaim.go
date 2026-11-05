@@ -133,7 +133,13 @@ func (r *BucketClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&cosiapi.Bucket{},
 			handler.EnqueueRequestsFromMapFunc(mapBucketToBucketClaim),
-			builder.WithPredicates(cosipredicate.AnyCreate()),
+			// A Bucket deletion must re-trigger the claim waiting on it so the
+			// claim finalizer is removed promptly instead of on the next
+			// error-backoff retry.
+			builder.WithPredicates(ctrlpredicate.Or(
+				cosipredicate.AnyCreate(),
+				cosipredicate.AnyDelete(),
+			)),
 		).
 		Named("bucketclaim").
 		Complete(r)
@@ -329,7 +335,7 @@ func (r *BucketClaimReconciler) reconcileDelete(
 		return r.removeClaimFinalizer(ctx, logger, claim)
 	}
 
-	logger = logger.WithValues("bucketDeletionPolicy", cosiapi.BucketDeletionPolicyRetain)
+	logger = logger.WithValues("bucketDeletionPolicy", bucket.Spec.DeletionPolicy)
 
 	switch bucket.Spec.DeletionPolicy {
 	case cosiapi.BucketDeletionPolicyRetain:

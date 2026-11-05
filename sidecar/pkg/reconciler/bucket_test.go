@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -99,6 +100,31 @@ func bucketReconcilerForClient(client client.Client, driverInfo DriverInfo) *Buc
 		Scheme:     client.Scheme(),
 		DriverInfo: driverInfo,
 	}
+}
+
+// ensureClaimForBucket makes sure the BucketClaim referenced by the Bucket
+// exists, so deletion tests can exercise the live/deleting/missing claim
+// cases in both the dynamic and the static provisioning test worlds.
+func ensureClaimForBucket(t *testing.T, ctx context.Context, r *BucketReconciler, bucket *cosiapi.Bucket) *cosiapi.BucketClaim {
+	t.Helper()
+
+	key := types.NamespacedName{
+		Name:      bucket.Spec.BucketClaimRef.Name,
+		Namespace: bucket.Spec.BucketClaimRef.Namespace,
+	}
+	claim := &cosiapi.BucketClaim{}
+	err := r.Get(ctx, key, claim)
+	if kerrors.IsNotFound(err) {
+		claim = &cosiapi.BucketClaim{ObjectMeta: meta.ObjectMeta{
+			Name:      key.Name,
+			Namespace: key.Namespace,
+			UID:       bucket.Spec.BucketClaimRef.UID,
+		}}
+		require.NoError(t, r.Create(ctx, claim))
+		return claim
+	}
+	require.NoError(t, err)
+	return claim
 }
 
 type bucketTestHelper interface {
@@ -370,7 +396,9 @@ func bucketDeletionTestSuite(t *testing.T,
 		})
 
 		t.Run("delete without claim deleting annotation", func(t *testing.T) {
-			// e.g., admin deleted the Bucket before BucketClaim deletion
+			// e.g., admin deleted the Bucket before BucketClaim deletion; the
+			// claim is still alive, so the deletion must wait, but the error
+			// must stay retryable so the claim watch can unblock it later.
 			deleteBucketReq = []*cosiproto.DriverDeleteBucketRequest{} // reset seen rpc calls
 
 			bootstrapped := bootstrapped.MustCopy() // copy prior test world state
@@ -378,11 +406,12 @@ func bucketDeletionTestSuite(t *testing.T,
 			r := bucketReconcilerForClient(bootstrapped.Client, driverInfo)
 
 			initBucket := helper.GetBucket(bootstrapped)
+			ensureClaimForBucket(t, ctx, r, initBucket)
 			require.NoError(t, r.Delete(ctx, initBucket))
 
 			res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: cositest.NsName(initBucket)})
 			assert.Error(t, err)
-			assert.ErrorIs(t, err, cosierr.NonRetryableError(nil))
+			assert.NotErrorIs(t, err, cosierr.NonRetryableError(nil))
 			assert.ErrorContains(t, err, "will not delete Bucket bound to a non-deleting BucketClaim")
 			assert.Empty(t, res)
 
@@ -399,6 +428,81 @@ func bucketDeletionTestSuite(t *testing.T,
 			assert.Equal(t, initBucket.Status.ReadyToUse, bucket.Status.ReadyToUse)
 			assert.NotNil(t, bucket.Status.Error)
 			assert.Contains(t, *bucket.Status.Error.Message, "will not delete Bucket bound to a non-deleting BucketClaim")
+		})
+
+		t.Run("delete without annotation while claim is deleting", func(t *testing.T) {
+			// The claim deletion started after the Bucket was already marked
+			// for deletion and the annotation was never applied. The deletion
+			// must proceed instead of deadlocking.
+			deleteBucketReq = []*cosiproto.DriverDeleteBucketRequest{} // reset seen rpc calls
+
+			bootstrapped := bootstrapped.MustCopy() // copy prior test world state
+			ctx := bootstrapped.ContextWithLogger
+			r := bucketReconcilerForClient(bootstrapped.Client, driverInfo)
+
+			initBucket := helper.GetBucket(bootstrapped)
+			claim := ensureClaimForBucket(t, ctx, r, initBucket)
+			if len(claim.Finalizers) == 0 {
+				claim.Finalizers = []string{"test/finalizer"}
+				require.NoError(t, r.Update(ctx, claim))
+			}
+			require.NoError(t, r.Delete(ctx, claim))
+			claim = &cosiapi.BucketClaim{}
+			require.NoError(t, r.Get(ctx, types.NamespacedName{
+				Name:      initBucket.Spec.BucketClaimRef.Name,
+				Namespace: initBucket.Spec.BucketClaimRef.Namespace,
+			}, claim))
+			require.False(t, claim.DeletionTimestamp.IsZero())
+
+			require.NoError(t, r.Delete(ctx, initBucket))
+
+			res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: cositest.NsName(initBucket)})
+			assert.NoError(t, err)
+			assert.Empty(t, res)
+
+			if initBucket.Status.BucketID == "" {
+				assert.Empty(t, deleteBucketReq)
+			} else {
+				require.Len(t, deleteBucketReq, 1)
+				assert.Equal(t, initBucket.Status.BucketID, deleteBucketReq[0].BucketId)
+			}
+
+			bootstrapped.AssertResourceDoesNotExist(t, cositest.NsName(initBucket), &cosiapi.Bucket{})
+		})
+
+		t.Run("delete without annotation after claim was removed", func(t *testing.T) {
+			// The claim is already gone, so nothing can wait for the Bucket
+			// deletion; it must proceed.
+			deleteBucketReq = []*cosiproto.DriverDeleteBucketRequest{} // reset seen rpc calls
+
+			bootstrapped := bootstrapped.MustCopy() // copy prior test world state
+			ctx := bootstrapped.ContextWithLogger
+			r := bucketReconcilerForClient(bootstrapped.Client, driverInfo)
+
+			initBucket := helper.GetBucket(bootstrapped)
+			claim := ensureClaimForBucket(t, ctx, r, initBucket)
+			claim.Finalizers = nil
+			require.NoError(t, r.Update(ctx, claim))
+			require.NoError(t, r.Delete(ctx, claim))
+			require.True(t, kerrors.IsNotFound(r.Get(ctx, types.NamespacedName{
+				Name:      initBucket.Spec.BucketClaimRef.Name,
+				Namespace: initBucket.Spec.BucketClaimRef.Namespace,
+			}, &cosiapi.BucketClaim{})))
+
+			require.NoError(t, r.Delete(ctx, initBucket))
+
+			res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: cositest.NsName(initBucket)})
+			assert.NoError(t, err)
+			assert.Empty(t, res)
+
+			if initBucket.Status.BucketID == "" {
+				assert.Empty(t, deleteBucketReq)
+			} else {
+				require.Len(t, deleteBucketReq, 1)
+				assert.Equal(t, initBucket.Status.BucketID, deleteBucketReq[0].BucketId)
+			}
+
+			bootstrapped.AssertResourceDoesNotExist(t, cositest.NsName(initBucket), &cosiapi.Bucket{})
 		})
 
 		t.Run("claim deleting annotation without delete", func(t *testing.T) {
