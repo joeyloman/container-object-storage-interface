@@ -1,0 +1,111 @@
+# Default values for container-object-storage-interface.
+#
+# This chart installs the COSI core controller and the objectstorage.k8s.io
+# CRDs. COSI drivers are installed separately, one chart per driver.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # Kubernetes staging registry image. Override for a release or mirrored image.
+  repository: gcr.io/k8s-staging-sig-storage/objectstorage-controller
+  # Tag currently deployed by this repository's kustomize manifests.
+  tag: v20260817-controllerv0.2.0-rc1-323-ge761fd7
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+# Leader election keeps a single active controller. Required for replicaCount > 1.
+leaderElection:
+  enabled: true
+
+# Controller log settings: --zap-log-level and --zap-devel.
+logLevel: info
+# development=true emits human-readable console logs; false emits JSON.
+development: false
+
+# Additional container arguments appended after the chart-managed ones.
+extraArgs: []
+
+healthProbe:
+  port: 8081
+
+metrics:
+  enabled: false
+  # Serve metrics over HTTPS and require Kubernetes authn/authz (TokenReview +
+  # SubjectAccessReview). Set to false for plaintext HTTP without auth.
+  secure: true
+  port: 8443
+  service:
+    type: ClusterIP
+    annotations: {}
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    # Empty uses the Prometheus default scrape timeout.
+    scrapeTimeout: ""
+    additionalLabels: {}
+    # The metrics server uses a self-signed certificate unless a cert path is
+    # supplied to the controller.
+    insecureSkipVerify: true
+    # Prometheus needs a token that is authorized for the /metrics nonResourceURL.
+    bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+
+serviceAccount:
+  create: true
+  # Defaults to the chart fullname when empty.
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  capabilities:
+    drop:
+      - ALL
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+priorityClassName: ""
+
+terminationGracePeriodSeconds: 10

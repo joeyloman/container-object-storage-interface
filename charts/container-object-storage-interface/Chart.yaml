@@ -1,0 +1,16 @@
+apiVersion: v2
+name: container-object-storage-interface
+description: |-
+  Container Object Storage Interface (COSI) core controller and CRDs for
+  Kubernetes. COSI drivers are installed separately.
+type: application
+version: 0.2.2
+appVersion: v0.2.2
+kubeVersion: ">=1.25.0-0"
+home: https://container-object-storage-interface.sigs.k8s.io/
+sources:
+  - https://github.com/kubernetes-sigs/container-object-storage-interface
+keywords:
+  - storage
+  - object-storage
+  - cosi

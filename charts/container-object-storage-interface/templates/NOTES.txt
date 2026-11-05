@@ -1,0 +1,15 @@
+Container Object Storage Interface (COSI) controller installed in namespace {{ .Release.Namespace }}.
+
+Verify the controller is running:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "cosi.fullname" . }}
+
+The objectstorage.k8s.io CRDs (buckets, bucketclaims, bucketaccesses,
+bucketclasses, bucketaccessclasses) are installed from the chart's crds/
+directory. Helm does not upgrade or delete files in crds/; apply CRD updates
+manually before upgrading the chart:
+
+  kubectl apply --server-side -f <chart>/crds/
+
+Next, install a COSI driver. Drivers are distributed separately; see
+https://container-object-storage-interface.sigs.k8s.io/drivers.html

@@ -35,6 +35,9 @@ DOCKER ?= docker
 ## KUBECTL :## Tool compatible with `kubectl` API
 KUBECTL ?= kubectl
 
+## HELM :## Tool compatible with `helm` API
+HELM ?= helm
+
 ## PLATFORM :## Platform for builds
 PLATFORM ?= linux/$(GOARCH)
 
@@ -115,11 +118,16 @@ build.sidecar: sidecar/Dockerfile ## Build only the sidecar container image
 	$(DOCKER) build --file sidecar/Dockerfile --platform $(PLATFORM) $(BUILD_ARGS) --tag $(SIDECAR_TAG) .
 
 .PHONY: generate
-generate: crds rbac controller/Dockerfile sidecar/Dockerfile ## Generate files
+generate: crds rbac helm-crds controller/Dockerfile sidecar/Dockerfile ## Generate files
 
 .PHONY: crds
 crds: controller-gen
 	cd ./client && $(CONTROLLER_GEN) crd paths="./apis/objectstorage/..."
+
+# Copy generated CRDs into the Helm chart's crds/ directory
+.PHONY: helm-crds
+helm-crds: crds
+	cp client/config/crd/objectstorage.k8s.io_*.yaml charts/container-object-storage-interface/crds/
 
 # Gen Controller RBAC from kubebuilder markers in reconciler go files
 .PHONY: rbac
@@ -180,6 +188,10 @@ deploy: kustomize ## Deploy controller (CONTROLLER_TAG) to the current kubectl c
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller (CONTROLLER_TAG) from the current kubectl context
 	./hack/dev-kustomize.sh && $(KUSTOMIZE) build $(CACHE) | $(KUBECTL) delete --ignore-not-found=true -f -
+
+.PHONY: helm-lint
+helm-lint: ## Lint the Helm chart
+	$(HELM) lint --strict charts/container-object-storage-interface
 
 #
 # ===== Tools =====
